@@ -107,10 +107,10 @@ class DrawScatter(Draw):
         self.d.render(path)
 
 # 箱线图
-def DrawBox(y_data):
-    box_plot = Boxplot()  # 这个使得两个箱线图重合
+def DrawBox(x,y_data):
+    box_plot = Boxplot()
     box_plot = (
-        box_plot.add_xaxis(xaxis_data=["guy"+str(i) for i in range(len(y_data))])
+        box_plot.add_xaxis(xaxis_data=[i for i in x])
             .add_yaxis(series_name="箱线图", y_axis=box_plot.prepare_data(y_data))
             .set_global_opts(
             title_opts=opts.TitleOpts(
