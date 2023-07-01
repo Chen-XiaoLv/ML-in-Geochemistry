@@ -1,0 +1,3 @@
+-i https://mirrors.aliyun.com/pypi/simple/ pyecharts
+torch
+-i https://mirrors.aliyun.com/pypi/simple/ seaborn
