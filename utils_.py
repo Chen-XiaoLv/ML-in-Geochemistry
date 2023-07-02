@@ -5,7 +5,12 @@ import pyecharts.faker as F
 from pyecharts.faker import Faker
 import numpy as np
 import pandas as pd
-
+import torch
+import torch.nn as nn
+import numpy as np
+import pandas as pd
+import torch.nn.functional as F
+from torchinfo import summary
 
 # 全局设置
 CurrentConfig.ONLINE_HOST = "https://cdn.kesci.com/lib/pyecharts_assets/"
@@ -167,27 +172,216 @@ def DrawPie(x,y):
     return pie
 
 
-if __name__ == '__main__':
-    x_data = ['Apple', 'Huawei', 'Xiaomi', 'Oppo', 'Vivo', 'Meizu']
-    y_data_1 = [123, 153, 89, 107, 98, 23]
-    y_data_2 = [32, 213, 60, 167, 142, 45]
-    # l=DrawLine(x_data,[y_data_1,y_data_2],["系列1","系列2"],"题目","品牌","数量")
-    l=DrawScatter(x_data,[y_data_1,y_data_2],["系列1","系列2"],"题目","品牌","数量").d
-    l.render("./Res/test01.html")
 
-    y_data = [
-        [980, 930, 650, 760, 810, 1000, 1000, 960, 960, ],
-        [920, 930, 650, 760, 310, 1000, 100, 960, 960, ],
-        [680, 930, 650, 260, 810, 1400, 1000, 960, 960, ],
-        [780, 930, 650, 760, 810, 1000, 600, 930, 960, ],
-        [980, 630, 650, 760, 810, 1000, 1000, 960, 960, ],
-    ]
-    b=DrawBox(y_data)
-    b.render("./Res/test02.html")
 
-    s=DrawMulStack([b,l])
-    s.render("./Res/test03.html")
+class ResNetBasicBlock(nn.Module):
+    def __init__(self,in_channel,out_channel,stride):
+        super(ResNetBasicBlock, self).__init__()
+        # ResNet
+        # [[Conv2d(3x3)->BN->ReLU]*2-ReLU]+x]->ReLU
+        self.conv1=nn.Conv2d(in_channel,out_channel,kernel_size=3,stride=stride,padding=1)
+        # size: (w-k+1)/s
+        self.bn1=nn.BatchNorm2d(out_channel)
+        self.re=nn.ReLU()
 
-    p=DrawPie(F.Faker.values(),F.Faker.choose())
-    p.render("./Res/test04.html")
+        self.conv2=nn.Conv2d(out_channel,out_channel,kernel_size=3,stride=stride,padding=1)
+        self.bn2=nn.BatchNorm2d(out_channel)
 
+    def forward(self,x):
+        out=self.re(self.bn1(self.conv1(x)))
+        out=self.bn2(self.conv2(out))
+        return self.re(out+x)
+
+class ResNetDownBlock(nn.Module):
+    def __init__(self,in_channel,out_channel,stride):
+        super(ResNetDownBlock, self).__init__()
+        self.conv1=nn.Conv2d(in_channel,out_channel,kernel_size=3,stride=stride[0],padding=1)
+        self.bn1=nn.BatchNorm2d(out_channel)
+
+        self.conv2=nn.Conv2d(out_channel,out_channel,kernel_size=3,stride=stride[1],padding=1)
+        self.bn2=nn.BatchNorm2d(out_channel)
+
+        self.extra=nn.Sequential(
+            nn.Conv2d(in_channel,out_channel,kernel_size=1,stride=stride[0],padding=0),
+            nn.BatchNorm2d(out_channel)
+        )
+
+    def forward(self,x):
+        extra_x=self.extra(x)
+        out=self.conv1(x)
+        out=F.relu(self.bn1(out))
+
+        out=self.conv2(out)
+        out=self.bn2(out)
+
+        return F.relu(extra_x+out)
+
+
+class BasicConv2d(nn.Module):
+    # 一个Conv+Bn+ReLU
+    def __init__(self,in_channel,out_channel,kernel,stride,padding=0):
+        super(BasicConv2d, self).__init__()
+        self.cbr=nn.Sequential(
+            nn.Conv2d(in_channel,out_channel,kernel_size=kernel,stride=stride,
+                      padding=padding,bias=False),
+            nn.BatchNorm2d(out_channel,eps=0.001,momentum=0.1,affine=True),
+            nn.ReLU(inplace=False)
+        )
+    def forward(self,x):
+        return self.cbr(x)
+
+# 一个简单的Inception模块
+class Mixed_5b(nn.Module):
+    def __init__(self):
+        super(Mixed_5b, self).__init__()
+        # Outsize
+        # W= [W+2*padding-kernel]/stride+1
+        # H= [H+2*padding-kernel]/stride+1
+
+        # Why can cat?
+        # cause when padding*2-kernel+1=0, they have the same width and height.
+        # so: K3 p1 s1
+        # k1 p0 s1
+        # k5 p2 s1
+        # they are the same
+        self.branch0=BasicConv2d(192,96,kernel=1,stride=1)
+        self.branch1=nn.Sequential(
+            BasicConv2d(192,48,kernel=1,stride=1),
+            BasicConv2d(48,64,5,1,2)
+        )
+        self.branch2=nn.Sequential(
+            BasicConv2d(192,64,kernel=1,stride=1),
+            BasicConv2d(64,96,kernel=3,stride=1,padding=1),
+            BasicConv2d(96,96,kernel=3,stride=1,padding=1)
+        )
+        self.branch3=nn.Sequential(
+            nn.AvgPool2d(3,stride=1,padding=1,count_include_pad=False),
+            BasicConv2d(192,64,1,1)
+        )
+
+    def forward(self,x):
+        x0=self.branch0(x)
+        x1=self.branch1(x)
+        x2=self.branch2(x)
+        x3=self.branch3(x)
+        out=torch.cat((x0,x1,x2,x3),1)
+        return out
+
+class Block35(nn.Module):
+    def __init__(self,scale=1.0):
+        super(Block35,self).__init__()
+        self.scale=scale
+        self.branch0=BasicConv2d(320,32,kernel=1,stride=1)
+        self.branch1=nn.Sequential(
+            BasicConv2d(320,32,1,1),
+            BasicConv2d(32,32,3,1,1)
+        )
+        self.branch2=nn.Sequential(
+            BasicConv2d(320,32,1,1),
+            BasicConv2d(32,48,3,1,1),
+            BasicConv2d(48,64,3,1,1)
+        )
+        self.conv2d=nn.Conv2d(128,320,kernel_size=1,stride=1)
+        self.relu=nn.ReLU(inplace=False)
+
+    def forward(self,x):
+        x0,x1,x2=self.branch0(x),self.branch1(x),self.branch2(x)
+        out=torch.cat((x0,x1,x2),1)
+        out=self.conv2d(out)
+        out=out*self.scale+x
+        out=self.relu(out)
+        return out
+
+# ConvBlock
+class Conv(nn.Module):
+    # 这个就是最基本的卷积结构，为了方便shortcut,留下了激活函数接口
+    def __init__(self,in_c,out_c,k_s=1,stride=1,padding=None,groups=1,activation=True):
+        super(Conv, self).__init__()
+        # padding这个参数，选择k_s//2就是为了让特征图的尺寸不发生改变
+        padding=k_s//2 if padding is None else padding
+        self.hidden=nn.Sequential(
+            nn.Conv2d(in_c,out_c,kernel_size=k_s,stride=stride,padding=padding,groups=groups,bias=False),
+            nn.BatchNorm2d(out_c)
+        )
+        self.act=nn.ReLU(inplace=True) if activation else nn.Identity()
+
+    def forward(self,x):
+        return self.act(self.hidden(x))
+
+# BasicBlock
+class ResBlock(nn.Module):
+    # 这是一个残差链接模块
+    def __init__(self,in_c,out_c,down_sample=False,groups=1):
+        super(ResBlock, self).__init__()
+        # 通过过stride进行降采样，当然也不是每次都做
+        stride=2 if down_sample else 1
+        mid_channels=out_c//4 # 中间无所谓了
+
+        # 如果做下采样的话，shortcut的大小也需要改变，这里就直接拿出一个不做ReLu的卷积来实现了
+        self.shortcut=Conv(in_c,out_c,k_s=1,stride=1,activation=False) \
+            if in_c!=out_c else nn.Identity()
+
+        # 经典 1 3 1 深层网络
+        self.conv=nn.Sequential(
+            *[
+                Conv(in_c,mid_channels,k_s=1,stride=1),
+                Conv(mid_channels,mid_channels,k_s=3,stride=stride,groups=groups),
+                Conv(mid_channels,out_c,k_s=1,stride=1,activation=False)
+            ]
+        )
+
+    def forward(self,x):
+        return F.relu(self.conv(x)+self.shortcut(x),inplace=True)
+
+# ResNet50
+class ResNet50(nn.Module):
+    def __init__(self,num_classes):
+        super(ResNet50, self).__init__()
+        # Stem阶段
+        self.stem=nn.Sequential(*[
+            Conv(3,64,k_s=7,stride=2),
+            nn.MaxPool2d(kernel_size=3,stride=2,padding=1)
+        ])
+
+        # Net50
+        self.stages=nn.Sequential(*[
+            self._make_stage(64,256,down_sample=False,num_classes=3),
+            self._make_stage(256,512,down_sample=True,num_classes=4),
+            self._make_stage(512,1024,down_sample=True,num_classes=6),
+            self._make_stage(1024,2048,down_sample=True,num_classes=3),
+        ])
+
+        # 输出阶段
+        self.head=nn.Sequential(*[
+            nn.AvgPool2d(kernel_size=7,stride=1,padding=0),
+            nn.Flatten(start_dim=1,end_dim=-1),
+            nn.Linear(2048,num_classes)
+        ])
+
+    @staticmethod
+    def _make_stage(in_channel,out_channel,down_sample,num_blocks):
+        layers=[ResBlock(in_channel,out_channel,down_sample=down_sample)]
+        for _ in range(1,num_blocks):
+            layers.append(ResBlock(out_channel,out_channel,down_sample=False))
+        return nn.Sequential(*layers)
+
+    def forward(self,x):
+        x=self.stages(self.stem(x))
+        return self.head(x)
+
+
+
+class NN(nn.Module):
+    def __init__(self,in_channel,out_channel):
+        super(NN, self).__init__()
+        self.hidden=nn.Sequential(
+            nn.Linear(in_channel,64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Linear(64,32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32,7)
+        )
+    def forward(self,x):
+        return self.hidden(x)
